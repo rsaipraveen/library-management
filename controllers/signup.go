@@ -16,17 +16,12 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-type Response struct {
-	message string
-	Error   error
-}
 type UserResponse struct {
-	Message      string
-	Error        bool
-	ErrorMessage string
+	Message      string `json:"error"`
+	Error        bool   `json:"message,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 type UserCred struct {
-	ID           uint   `gorm:"column:id"`
 	Email        string `gorm:"column:email"`
 	HashPassword string `gorm:"column:password"`
 }
@@ -51,9 +46,16 @@ type LoginCredentials struct {
 	Password string `json:"password"`
 }
 
+var (
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrUserNotFound       = errors.New("user not found")
+	ErrRedisKeyNotFound   = errors.New("redis key not found")
+)
+
 func SignUp(c *gin.Context) {
+	ctx := context.Background()
 	var user Users
-	var response Response
+	var response UserResponse
 	errJson := c.BindJSON(&user)
 	if errJson != nil {
 		c.AbortWithError(400, errJson)
@@ -87,8 +89,8 @@ func SignUp(c *gin.Context) {
 	if result.Error != nil {
 		fmt.Println("errror:", result.Error.Error())
 		log.Println("failed to insert user profile into database", result.Error.Error())
-		response.message = "user creation failed"
-		response.Error = result.Error
+		response.Message = "user creation failed"
+		response.Error = true
 		c.JSON(http.StatusBadRequest, response)
 		return
 	}
@@ -106,7 +108,7 @@ func SignUp(c *gin.Context) {
 		})
 		return
 	}
-	InsertCredentialsToRedis(requestUser.Email, requestUser.Password)
+	InsertCredentialsToRedis(ctx, requestUser.Email, requestUser.Password)
 	// send success message
 	fmt.Println("response result :", result)
 }
@@ -136,105 +138,97 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, response)
 		return
 	}
-	// hashpwd, err2 := FetchDetailsFromRedis(ctx, credential)
-	// if err2 != nil {
-	// 	// TODO : check error scenarios
-	// 	log.Println("failed to fetch details from redis", err2)
+	userCred, errRedis := AuthenticateFromRedis(ctx, credential)
+	if errRedis != nil {
+		switch errRedis {
+		case ErrInvalidCredentials:
+			response.Error = true
+			response.ErrorMessage = " Invalid credentials "
+			c.JSON(http.StatusBadRequest, response)
+			return
+		case ErrRedisKeyNotFound:
+			fmt.Println("ErrRedisKeyNotFound case")
+			AuthenticateFromDatabase(ctx, credential)
+		default:
+			log.Println("Redis error ", err)
+		}
+	} else {
 
-	// }
-	// fmt.Println(" redis nil :: ", err == redis.Nil)
-	// if hashpwd != "" {
-	// 	err3 := compareHashPasswords(hashpwd, credential.Password)
-	// 	if err3 != nil {
-	// 		log.Println(" passwords mismatched , invalid credentials ")
-	// 		response.Error = true
-	// 		response.ErrorMessage = " invalid credentials , please check"
-	// 		c.JSON(http.StatusBadRequest, response)
-	// 		return
-	// 	}
-	// 	response.Message = "credentials are matched"
-	// 	response.ErrorMessage = ""
-	// 	errToken := GenerateJWtokensAndStoreInCookie(c, user.ID, credential.Email)
+		errToken := GenerateJWtokensAndStoreInCookie(c, credential.Email)
+		if errToken != nil {
+			log.Println(" failed to create token ", err)
+			response.Error = true
+			response.ErrorMessage = "Failed to create token"
+			c.JSON(http.StatusBadRequest, response)
+			return
+		}
+		response.Error = false
+		response.Message = " Valid credentials ," + userCred.Email + " logged in successfully "
+		c.JSON(http.StatusOK, response)
+		return
+	}
 
-	// 	if errToken != nil {
-	// 		log.Println("token creation failed")
-	// 	}
-	// 	c.JSON(http.StatusOK, response)
-	// 	return
-	// }
-
-	usercred, err3 := AuthenticateFromRedis(ctx, credential)
-	if err3 != nil {
+	// if cred is available is redis and compareHashPasswords returns error below code should not execute
+	usercredDb, errDb := AuthenticateFromDatabase(ctx, credential)
+	if errDb != nil {
+		log.Println("invalid credentials :", errDb)
+	}
+	fmt.Println("usercredDb", usercredDb)
+	errToken := GenerateJWtokensAndStoreInCookie(c, credential.Email)
+	if errToken != nil {
+		log.Println(" failed to create token ", err)
 		response.Error = true
-		response.ErrorMessage = " invalid request format "
+		response.ErrorMessage = "Failed to create token"
 		c.JSON(http.StatusBadRequest, response)
 		return
 	}
-	fmt.Println("u::", usercred)
-	fmt.Println("e ::", err3)
-	response.Message = "credentials are matched"
-	response.ErrorMessage = ""
+	response.Message = "credentials are matched, Login successfully "
 	c.JSON(http.StatusOK, response)
-
-	// if cred is available is redis and compareHashPasswords returns error below code should not execute
-
-	// result := initializers.DB.Table("user_profiles").Select("ID, password").Where("email = ?", credential.Email).Scan(&user)
-	// fmt.Println("now validating data from postgres")
-	// if result.Error != nil {
-	// 	response.Error = true
-	// 	response.ErrorMessage = "failed to process request "
-	// 	c.JSON(http.StatusBadRequest, response)
-	// 	return
-	// }
-
-	// if result.RowsAffected == 0 {
-	// 	response.Error = true
-	// 	response.ErrorMessage = "invalid email or password "
-	// 	c.JSON(http.StatusUnauthorized, response)
-	// 	return
-	// }
-
-	// fmt.Println(" user ", user)
-	// errHash := compareHashPasswords(user.HashPassword, credential.Password)
-	// // errHash := bcrypt.CompareHashAndPassword([]byte(user.HashPassword), []byte(credential.Password))
-	// if errHash != nil {
-	// 	response.Error = true
-	// 	response.ErrorMessage = "invalid credentails,  password mismatch "
-	// 	c.JSON(http.StatusBadRequest, response)
-	// 	return
-	//}
-	// push data to redis
-	// InsertCredentialsToRedis(credential.Email, user.HashPassword)
-	// response.Message = "credentials are matched"
-
-	// errToken := GenerateJWtokensAndStoreInCookie(c, user.ID, credential.Email)
-
-	// if errToken != nil {
-	// 	log.Println("token creation failed")
-	// }
-
-	// c.JSON(http.StatusOK, response)
 }
 
 func AuthenticateFromRedis(ctx context.Context, credential LoginCredentials) (*UserCred, error) {
-	hashPwd, err := FetchDetailsFromRedis(ctx, credential)
 
-	if err != nil || hashPwd == "" {
-		log.Println("error found ")
-		return nil, redis.Nil
+	if credential.Email == "" || credential.Password == "" {
+		log.Println("Invalid credentials ")
+		return nil, ErrInvalidCredentials
 	}
-	err2 := compareHashPasswords(hashPwd, credential.Password)
+
+	userKey := fmt.Sprintf("user:%s", credential.Email)
+	result, err := initializers.Client.HGetAll(ctx, userKey).Result()
+	fmt.Println("result :", result)
+	if err != nil {
+
+		return nil, errors.New("Redis error " + err.Error())
+	}
+	hashPassword, isExists := result["password"]
+	if !isExists || hashPassword == "" {
+		log.Println("user key not found in redis")
+		return nil, ErrRedisKeyNotFound
+	}
+	err2 := compareHashPasswords(hashPassword, credential.Password)
 	if err2 != nil {
 		log.Println("invalid credentials", err2)
-		return nil, errors.New("invalid credentials ")
+		return nil, ErrInvalidCredentials
 	}
 	// Add Id to below
 	return &UserCred{
 		Email:        credential.Email,
-		HashPassword: hashPwd,
+		HashPassword: hashPassword,
 	}, nil
+
 }
 
+func FetchDetailsFromRedis(ctx context.Context, credential LoginCredentials) (string, error) {
+	userKey := fmt.Sprintf("user:%s", credential.Email)
+	result, err := initializers.Client.HGetAll(initializers.CTX, userKey).Result()
+	fmt.Println("error :", err == redis.Nil)
+	if err != nil {
+		log.Println("error while fetching details from redis ", err)
+		return "", err
+	}
+	fmt.Println("result :::", result, err)
+	return result["password"], nil
+}
 func AuthenticateFromDatabase(ctx context.Context, credential LoginCredentials) (*UserCred, error) {
 	var userCred *UserCred
 	result := initializers.DB.Table("user_profiles").Select("id,email, password").Where("email = ?", credential.Email).Scan(&userCred)
@@ -266,9 +260,9 @@ func (user *Users) HashPassword() error {
 	return nil
 }
 
-func InsertCredentialsToRedis(email, password string) error {
+func InsertCredentialsToRedis(ctx context.Context, email, password string) error {
 	userKey := fmt.Sprintf("user:%s", email)
-	errRedis := initializers.Client.HSet(initializers.CTX, userKey, map[string]interface{}{
+	errRedis := initializers.Client.HSet(ctx, userKey, map[string]interface{}{
 		"email":    email,
 		"password": password,
 	}).Err()
@@ -285,26 +279,11 @@ func compareHashPasswords(hashPwd, pwd string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hashPwd), []byte(pwd))
 }
 
-func FetchDetailsFromRedis(ctx context.Context, credential LoginCredentials) (string, error) {
-	userKey := fmt.Sprintf("user:%s", credential.Email)
-	result, err := initializers.Client.HGetAll(initializers.CTX, userKey).Result()
-	fmt.Println("error :", err == redis.Nil)
-	if err != nil {
-		log.Println("error while fetching details from redis ", err)
-		return "", err
-	}
-	fmt.Println("result :::", result, err)
-	// if len(result) == 0 {
-	// 	return nil, redis.Nil
-	// }
-	return result["password"], nil
-}
-
-func GenerateJWtokensAndStoreInCookie(c *gin.Context, userId uint, email string) error {
+func GenerateJWtokensAndStoreInCookie(c *gin.Context, email string) error {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_Id": userId,
-		"sub":     email,                            // subject ( user identifier )
-		"exp":     time.Now().Add(time.Hour).Unix(), // expiration time)
+		//	"user_Id": userId,
+		"sub": email,                            // subject ( user identifier )
+		"exp": time.Now().Add(time.Hour).Unix(), // expiration time)
 	})
 
 	tokenString, err := token.SignedString([]byte("owgeg35g35hgnwh1fh"))
