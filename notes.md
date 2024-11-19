@@ -21,6 +21,18 @@ Redis :
             else 
                 fetch credentials from pgsql 
 
+Login Request
+│
+├── Valid JSON? → No → Return 400
+│
+├── Redis Auth
+│   ├── Success → Generate Token → Return 200
+│   ├── Invalid Credentials → Return 401
+│   └── Key Not Found → Try Database
+│
+└── Database Auth
+    ├── Success → Generate Token → Return 200
+    └── Failure → Return 401
 
 -> Implement roles for users in user_Profiles to implement authorization 
 
