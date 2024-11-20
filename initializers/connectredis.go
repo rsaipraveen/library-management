@@ -14,7 +14,6 @@ import (
 	try inserting sample data and fetch
 */
 
-var CTX = context.Background()
 var Client *redis.Client
 
 func ConnectRedis() {
@@ -24,7 +23,7 @@ func ConnectRedis() {
 		DB:       0,  // use default DB
 	})
 
-	pong, err := Client.Ping(CTX).Result()
+	pong, err := Client.Ping(context.Background()).Result()
 	if err != nil {
 		log.Println("redis connection establishment failed", err)
 		return
