@@ -180,7 +180,7 @@ func AuthenticateUser(ctx context.Context, credential LoginCredentials) (*UserCr
 	if err != nil {
 		return nil, err
 	}
-
+// Inserts crendentials to cache
 	go func() {
 		cacheCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
