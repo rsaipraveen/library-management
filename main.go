@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"library-management/controllers"
 	"library-management/initializers"
+	"library-management/middleware"
 	"net/http"
 
 	// "log"
@@ -25,7 +26,8 @@ func main() {
 	r := gin.Default()
 	r.GET("/", hello)
 	r.POST("/signup", controllers.SignUp)
-	r.POST("/login", controllers.Login)
+	r.POST("/login", controllers.LoginUser)
+	r.GET("/validate", middleware.AuthMiddleware, controllers.Validate)
 	r.Run()
 }
 
@@ -35,6 +37,7 @@ func hello(c *gin.Context) {
 	})
 }
 func init() {
+	initializers.LoadEnvVariables()
 	initializers.ConnectDatabase()
 	initializers.ConnectRedis()
 }

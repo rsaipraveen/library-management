@@ -8,10 +8,12 @@ import (
 	"library-management/initializers"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -26,6 +28,14 @@ type UserCred struct {
 	HashPassword string `gorm:"column:password"`
 }
 
+type Tokens struct {
+	AccessToken  string
+	AccessUuid   string
+	AtExpires    int64
+	RefreshToken string
+	RefreshUuid  string
+	RtExpires    int64
+}
 type Users struct {
 	FirstName    string `json:"first_name"`
 	LastName     string `json:"last_name"`
@@ -46,6 +56,12 @@ type LoginCredentials struct {
 	Password string `json:"password"`
 }
 
+// AccessDetails contains token metadata
+type AccessDetails struct {
+	AccessUuid string
+	Email      string
+}
+
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrUserNotFound       = errors.New("user not found")
@@ -54,6 +70,8 @@ var (
 
 func SignUp(c *gin.Context) {
 	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	var user Users
 	var response UserResponse
 	errJson := c.BindJSON(&user)
@@ -61,7 +79,7 @@ func SignUp(c *gin.Context) {
 		c.AbortWithError(400, errJson)
 		return
 	}
-	fmt.Println("user :", user)
+	log.Println("user :", user)
 
 	// check if passwords is not ""
 	// encrypt/hash password
@@ -87,7 +105,7 @@ func SignUp(c *gin.Context) {
 
 	result := initializers.DB.Create(&requestUser)
 	if result.Error != nil {
-		fmt.Println("errror:", result.Error.Error())
+		log.Println("errror:", result.Error.Error())
 		log.Println("failed to insert user profile into database", result.Error.Error())
 		response.Message = "user creation failed"
 		response.Error = true
@@ -96,7 +114,7 @@ func SignUp(c *gin.Context) {
 	}
 	// inserting username and hashedpassword to redis as key value pair
 	userKey := fmt.Sprintf("user:%s", requestUser.Email)
-	errRedis := initializers.Client.HSet(initializers.CTX, userKey, map[string]interface{}{
+	errRedis := initializers.Client.HSet(ctx, userKey, map[string]interface{}{
 		"email":    requestUser.Email,
 		"password": requestUser.Password,
 	}).Err()
@@ -108,12 +126,12 @@ func SignUp(c *gin.Context) {
 		})
 		return
 	}
-	InsertCredentialsToRedis(ctx, requestUser.Email, requestUser.Password)
+	// InsertCredentialsToRedis(ctx, requestUser.Email, requestUser.Password)
 	// send success message
-	fmt.Println("response result :", result)
+	log.Println("response result :", result)
 }
 
-func Login(c *gin.Context) {
+func LoginUser(c *gin.Context) {
 	// Explicitly map struct fields to database column names using gorm tags as it was not able to fetch and deteails properly
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -128,7 +146,7 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, response)
 		return
 	}
-	userCred, errAuth, isDB := AuthenticateUser(ctx, credential)
+	userCred, errAuth := AuthenticateUser(ctx, credential)
 	if errAuth != nil {
 		log.Println("User authentication failed :", errAuth)
 		response.Error = true
@@ -136,19 +154,6 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, response)
 		return
 	}
-
-	if isDB {
-		fmt.Println(" isdb loop :", isDB)
-		if errDb := InsertCredentialsToRedis(ctx, userCred.Email, userCred.HashPassword); errDb != nil {
-			log.Println("failed to insert user credenetials in redis ", errDb)
-			response.Error = true
-			response.ErrorMessage = " failed to insert user credentials into redis "
-			c.JSON(http.StatusBadRequest, response)
-			return
-		}
-		log.Println(" user credentials successfully inserted into redis ", userCred.Email)
-	}
-
 	if errToken := GenerateJWtokensAndStoreInCookie(c, userCred.Email); errToken != nil {
 		log.Println(" failed to create token :", errToken)
 		response.Error = true
@@ -161,23 +166,30 @@ func Login(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func AuthenticateUser(ctx context.Context, credential LoginCredentials) (*UserCred, error, bool) {
-	var isDB bool // by default bool value is false
+func AuthenticateUser(ctx context.Context, credential LoginCredentials) (*UserCred, error) {
 	userCred, err := AuthenticateFromRedis(ctx, credential)
 	if err == nil {
-		return userCred, nil, false
+		return userCred, nil
 	}
 	if !errors.Is(err, ErrRedisKeyNotFound) {
-		return nil, err, false
+		return nil, err
 	}
 
 	// Fallback to db authentication
 	userCred, err = AuthenticateFromDatabase(ctx, credential)
-	isDB = true
 	if err != nil {
-		return nil, err, false
+		return nil, err
 	}
-	return userCred, nil, isDB
+
+	go func() {
+		cacheCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if errCache := InsertCredentialsToRedis(cacheCtx, userCred.Email, userCred.HashPassword); errCache != nil {
+			log.Println(" failed to cache user credentials in redis :", errCache)
+		}
+	}()
+
+	return userCred, nil
 }
 
 func AuthenticateFromRedis(ctx context.Context, credential LoginCredentials) (*UserCred, error) {
@@ -189,7 +201,7 @@ func AuthenticateFromRedis(ctx context.Context, credential LoginCredentials) (*U
 
 	userKey := fmt.Sprintf("user:%s", credential.Email)
 	result, err := initializers.Client.HGetAll(ctx, userKey).Result()
-	fmt.Println("result :", result)
+	log.Println("result :", result)
 	if err != nil {
 
 		return nil, errors.New("Redis error " + err.Error())
@@ -234,13 +246,13 @@ func AuthenticateFromDatabase(ctx context.Context, credential LoginCredentials) 
 
 func FetchDetailsFromRedis(ctx context.Context, credential LoginCredentials) (string, error) {
 	userKey := fmt.Sprintf("user:%s", credential.Email)
-	result, err := initializers.Client.HGetAll(initializers.CTX, userKey).Result()
-	fmt.Println("error :", err == redis.Nil)
+	result, err := initializers.Client.HGetAll(ctx, userKey).Result()
+	log.Println("error :", err == redis.Nil)
 	if err != nil {
 		log.Println("error while fetching details from redis ", err)
 		return "", err
 	}
-	fmt.Println("result :::", result, err)
+	log.Println("result :::", result, err)
 	return result["password"], nil
 }
 func InsertCredentialsToRedis(ctx context.Context, email, password string) error {
@@ -271,20 +283,86 @@ func compareHashPasswords(hashPwd, pwd string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hashPwd), []byte(pwd))
 }
 
-func GenerateJWtokensAndStoreInCookie(c *gin.Context, email string) error {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		//	"user_Id": userId,
-		"sub": email,                            // subject ( user identifier )
-		"exp": time.Now().Add(time.Hour).Unix(), // expiration time)
-	})
+func createToken(email string) (*Tokens, error) {
+	var err error
+	token := &Tokens{
+		AtExpires:   time.Now().Add(time.Minute * 15).Unix(),   // Access token expires in 15 mins
+		RtExpires:   time.Now().Add(time.Hour * 24 * 7).Unix(), // Refresh token expires in 7 days
+		AccessUuid:  uuid.New().String(),
+		RefreshUuid: uuid.New().String(),
+	}
 
-	tokenString, err := token.SignedString([]byte("owgeg35g35hgnwh1fh"))
+	atClaims := jwt.MapClaims{
+		"authorized":  true,
+		"access_uuid": token.AccessUuid,
+		"email":       email,
+		"exp":         token.AtExpires,
+	}
+	tokenVal := jwt.NewWithClaims(jwt.SigningMethodHS256, atClaims)
+
+	token.AccessToken, err = tokenVal.SignedString([]byte(os.Getenv("ACCESS_SECRET")))
 	if err != nil {
-		log.Println("failed to create token string ", err)
+		log.Println("signing of token failed ")
+		return nil, err
+	}
+	// Creating Refresh Token
+	rtClaims := jwt.MapClaims{
+		"refresh_uuid": token.RefreshUuid,
+		"user_id":      email,
+		"exp":          token.RtExpires,
+	}
+	rt := jwt.NewWithClaims(jwt.SigningMethodHS256, rtClaims)
+	token.RefreshToken, err = rt.SignedString([]byte(os.Getenv("REFRESH_SECRET")))
+	if err != nil {
+		return nil, err
+	}
+	return token, nil
+
+}
+func createAuthToken(email string, tokenObj *Tokens) error {
+	at := time.Unix(tokenObj.AtExpires, 0)
+	rt := time.Unix(tokenObj.RtExpires, 0)
+	now := time.Now()
+	fmt.Println("at :::", at.Sub(now))
+	fmt.Println("rt :::", rt.Sub(now))
+	ctx := context.Background()
+
+	fmt.Println("access uuid ", tokenObj.AccessUuid)
+	fmt.Println("refresh uuid ", tokenObj.RefreshUuid)
+	// Store access token metadata
+	err := initializers.Client.Set(ctx, tokenObj.AccessUuid, email, at.Sub(now)).Err()
+	if err != nil {
+		log.Println("failed to insert access token in redis ", err)
 		return err
 	}
 
-	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("Authorization", tokenString, 3600*24*30, "", "", false, true)
+	// Store refresh token metadata
+	err = initializers.Client.Set(ctx, tokenObj.RefreshUuid, email, rt.Sub(now)).Err()
+	if err != nil {
+		log.Println("failed to insert refresh token in redis ", err)
+		return err
+	}
 	return nil
+
+}
+func GenerateJWtokensAndStoreInCookie(c *gin.Context, email string) error {
+
+	token, err := createToken(email)
+	if err != nil {
+
+	}
+	if err2 := createAuthToken(email, token); err2 != nil {
+		log.Println("failed to insert tokens into redis", err2)
+	}
+
+	c.SetSameSite(http.SameSiteLaxMode)
+	fmt.Println("access_token:", token.AccessToken)
+	fmt.Println("refresh_token :", token.RefreshToken)
+	c.SetCookie("access_token", token.AccessToken, 3600*24*30, "", "", false, true)
+	c.SetCookie("refresh_token", token.RefreshToken, 3600*24*30, "", "", false, true)
+	return nil
+}
+
+func Validate(c *gin.Context) {
+	log.Println(" validate func : ")
 }
