@@ -4,16 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	models "library-management/Models"
 	"library-management/initializers"
+	"library-management/internals/middleware"
+	"library-management/internals/models"
+	logger "library-management/loggers"
 	"log"
+
+	//"log"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -28,14 +29,6 @@ type UserCred struct {
 	HashPassword string `gorm:"column:password"`
 }
 
-type Tokens struct {
-	AccessToken  string
-	AccessUuid   string
-	AtExpires    int64
-	RefreshToken string
-	RefreshUuid  string
-	RtExpires    int64
-}
 type Users struct {
 	FirstName    string `json:"first_name"`
 	LastName     string `json:"last_name"`
@@ -69,6 +62,7 @@ var (
 )
 
 func SignUp(c *gin.Context) {
+	logger.Logger.Info("Signup function ")
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -79,7 +73,7 @@ func SignUp(c *gin.Context) {
 		c.AbortWithError(400, errJson)
 		return
 	}
-	log.Println("user :", user)
+	logger.Logger.Info("user :", user)
 
 	// check if passwords is not ""
 	// encrypt/hash password
@@ -132,6 +126,7 @@ func SignUp(c *gin.Context) {
 }
 
 func LoginUser(c *gin.Context) {
+	logger.Logger.Info("try to log ....")
 	// Explicitly map struct fields to database column names using gorm tags as it was not able to fetch and deteails properly
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -154,21 +149,23 @@ func LoginUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, response)
 		return
 	}
-	if errToken := GenerateJWtokensAndStoreInCookie(c, userCred.Email); errToken != nil {
-		log.Println(" failed to create token :", errToken)
+	if errToken := middleware.GenerateTokensAndSaveInCookies(c, userCred.Email); errToken != nil {
+		//if errToken := GenerateJWtokensAndStoreInCookie(c, userCred.Email); errToken != nil {
+		log.Println(" failed to create token pairs :", errToken)
 		response.Error = true
-		response.ErrorMessage = "Token creation failed "
+		response.ErrorMessage = "Token creations failed "
 		c.JSON(http.StatusBadRequest, response)
 		return
 	}
-
 	response.Message = "valid credentials,  " + userCred.Email + " logged in successfully "
+	logger.Logger.Info("valid credentials,  " + userCred.Email + " logged in successfully ")
 	c.JSON(http.StatusOK, response)
 }
 
 func AuthenticateUser(ctx context.Context, credential LoginCredentials) (*UserCred, error) {
 	userCred, err := AuthenticateFromRedis(ctx, credential)
 	if err == nil {
+
 		return userCred, nil
 	}
 	if !errors.Is(err, ErrRedisKeyNotFound) {
@@ -180,7 +177,7 @@ func AuthenticateUser(ctx context.Context, credential LoginCredentials) (*UserCr
 	if err != nil {
 		return nil, err
 	}
-// Inserts crendentials to cache
+	// Inserts crendentials to cache
 	go func() {
 		cacheCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -283,85 +280,77 @@ func compareHashPasswords(hashPwd, pwd string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hashPwd), []byte(pwd))
 }
 
-func createToken(email string) (*Tokens, error) {
-	var err error
-	token := &Tokens{
-		AtExpires:   time.Now().Add(time.Minute * 15).Unix(),   // Access token expires in 15 mins
-		RtExpires:   time.Now().Add(time.Hour * 24 * 7).Unix(), // Refresh token expires in 7 days
-		AccessUuid:  uuid.New().String(),
-		RefreshUuid: uuid.New().String(),
-	}
+// func createToken(email string) (*TokenPair, error) {
+// 	var err error
+// 	token := &TokenPair{
+// 		AtExpires:   time.Now().Add(time.Minute * 15).Unix(),   // Access token expires in 15 mins
+// 		RtExpires:   time.Now().Add(time.Hour * 24 * 7).Unix(), // Refresh token expires in 7 days
+// 		AccessUuid:  uuid.New().String(),
+// 		RefreshUuid: uuid.New().String(),
+// 	}
 
-	atClaims := jwt.MapClaims{
-		"authorized":  true,
-		"access_uuid": token.AccessUuid,
-		"email":       email,
-		"exp":         token.AtExpires,
-	}
-	tokenVal := jwt.NewWithClaims(jwt.SigningMethodHS256, atClaims)
+// 	atClaims := jwt.MapClaims{
+// 		"authorized":  true,
+// 		"access_uuid": token.AccessUuid,
+// 		"email":       email,
+// 		"exp":         token.AtExpires,
+// 	}
+// 	tokenVal := jwt.NewWithClaims(jwt.SigningMethodHS256, atClaims)
 
-	token.AccessToken, err = tokenVal.SignedString([]byte(os.Getenv("ACCESS_SECRET")))
-	if err != nil {
-		log.Println("signing of token failed ")
-		return nil, err
-	}
-	// Creating Refresh Token
-	rtClaims := jwt.MapClaims{
-		"refresh_uuid": token.RefreshUuid,
-		"user_id":      email,
-		"exp":          token.RtExpires,
-	}
-	rt := jwt.NewWithClaims(jwt.SigningMethodHS256, rtClaims)
-	token.RefreshToken, err = rt.SignedString([]byte(os.Getenv("REFRESH_SECRET")))
-	if err != nil {
-		return nil, err
-	}
-	return token, nil
+// 	token.AccessToken, err = tokenVal.SignedString([]byte(os.Getenv("ACCESS_SECRET")))
+// 	if err != nil {
+// 		log.Println("signing of token failed ")
+// 		return nil, err
+// 	}
+// 	// Creating Refresh Token
+// 	rtClaims := jwt.MapClaims{
+// 		"refresh_uuid": token.RefreshUuid,
+// 		"user_id":      email,
+// 		"exp":          token.RtExpires,
+// 	}
+// 	rt := jwt.NewWithClaims(jwt.SigningMethodHS256, rtClaims)
+// 	token.RefreshToken, err = rt.SignedString([]byte(os.Getenv("REFRESH_SECRET")))
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return token, nil
 
-}
-func createAuthToken(email string, tokenObj *Tokens) error {
-	at := time.Unix(tokenObj.AtExpires, 0)
-	rt := time.Unix(tokenObj.RtExpires, 0)
-	now := time.Now()
-	fmt.Println("at :::", at.Sub(now))
-	fmt.Println("rt :::", rt.Sub(now))
-	ctx := context.Background()
+// }
+// func createAuthToken(email string, tokenObj *TokenPair) error {
+// 	at := time.Unix(tokenObj.AtExpires, 0)
+// 	rt := time.Unix(tokenObj.RtExpires, 0)
+// 	now := time.Now()
+// 	ctx := context.Background()
+// 	// Store access token metadata
+// 	err := initializers.Client.Set(ctx, tokenObj.AccessUuid, email, at.Sub(now)).Err()
+// 	if err != nil {
+// 		log.Println("failed to insert access token in redis ", err)
+// 		return err
+// 	}
 
-	fmt.Println("access uuid ", tokenObj.AccessUuid)
-	fmt.Println("refresh uuid ", tokenObj.RefreshUuid)
-	// Store access token metadata
-	err := initializers.Client.Set(ctx, tokenObj.AccessUuid, email, at.Sub(now)).Err()
-	if err != nil {
-		log.Println("failed to insert access token in redis ", err)
-		return err
-	}
+// 	// Store refresh token metadata
+// 	err = initializers.Client.Set(ctx, tokenObj.RefreshUuid, email, rt.Sub(now)).Err()
+// 	if err != nil {
+// 		log.Println("failed to insert refresh token in redis ", err)
+// 		return err
+// 	}
+// 	return nil
+// }
+// func GenerateJWtokensAndStoreInCookie(c *gin.Context, email string) error {
 
-	// Store refresh token metadata
-	err = initializers.Client.Set(ctx, tokenObj.RefreshUuid, email, rt.Sub(now)).Err()
-	if err != nil {
-		log.Println("failed to insert refresh token in redis ", err)
-		return err
-	}
-	return nil
+// 	token, err := createToken(email)
+// 	if err != nil {
 
-}
-func GenerateJWtokensAndStoreInCookie(c *gin.Context, email string) error {
+// 	}
+// 	if err2 := createAuthToken(email, token); err2 != nil {
+// 		log.Println("failed to insert tokens into redis", err2)
+// 	}
 
-	token, err := createToken(email)
-	if err != nil {
-
-	}
-	if err2 := createAuthToken(email, token); err2 != nil {
-		log.Println("failed to insert tokens into redis", err2)
-	}
-
-	c.SetSameSite(http.SameSiteLaxMode)
-	fmt.Println("access_token:", token.AccessToken)
-	fmt.Println("refresh_token :", token.RefreshToken)
-	c.SetCookie("access_token", token.AccessToken, 3600*24*30, "", "", false, true)
-	c.SetCookie("refresh_token", token.RefreshToken, 3600*24*30, "", "", false, true)
-	return nil
-}
+// 	c.SetSameSite(http.SameSiteLaxMode)
+// 	c.SetCookie("access_token", token.AccessToken, 60*15, "", "", false, true)
+// 	c.SetCookie("refresh_token", token.RefreshToken, 3600*24*30, "", "", false, true)
+// 	return nil
+// }
 
 func Validate(c *gin.Context) {
 	log.Println(" validate func : ")

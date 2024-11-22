@@ -6,7 +6,7 @@ import (
 
 // defining the schema
 type UserProfile struct {
-	ID           uint      `gorm :"primaryKey"`
+	ID           uint      `gorm:"primaryKey"`
 	FirstName    string    `gorm:"not null;column:first_name"`
 	LastName     string    `gorm:"not null;column:last_name"`
 	Email        string    `gorm:"not null;unique;column:email"`

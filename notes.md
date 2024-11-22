@@ -89,3 +89,30 @@ NOTES
 
 
   
+
+
+  --------------------------
+
+
+  Authenticate middleware functionality 
+
+  step 1 : fetch accesstoken from cookie 
+  step 2 : Present : extract metadata and email id from redis 
+  step 3: if no access token : call refresh token to create both tokens ( access and refresh tokens )
+
+
+
+  step 2 : extract metadata and email id from redis 
+
+   step a : first validate jwt token 
+      if token is valid 
+      fetch access_uuid and email from redis 
+
+
+
+
+// Issues 
+
+   1. check how to handle concurrent login handle issues 
+   2. check context related issues in middleware
+   3. Implement rate limiting 
